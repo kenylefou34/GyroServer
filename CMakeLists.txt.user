@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE QtCreatorProject>
-<!-- Written by QtCreator 7.0.0, 2024-09-09T21:41:06. -->
+<!-- Written by QtCreator 7.0.0, 2024-09-24T11:45:17. -->
 <qtcreator>
  <data>
   <variable>EnvironmentId</variable>
@@ -287,7 +287,7 @@
     <value type="QString" key="ProjectExplorer.ProjectConfiguration.DisplayName">GyroClient</value>
     <value type="QString" key="ProjectExplorer.ProjectConfiguration.Id">CMakeProjectManager.CMakeRunConfiguration.GyroClient</value>
     <value type="QString" key="ProjectExplorer.RunConfiguration.BuildKey">GyroClient</value>
-    <value type="QString" key="RunConfiguration.Arguments">192.168.1.100 50000 192.168.1.95 54321 /tmp/frames.raw</value>
+    <value type="QString" key="RunConfiguration.Arguments">192.168.1.100 5000</value>
     <value type="bool" key="RunConfiguration.UseCppDebugger">false</value>
     <value type="bool" key="RunConfiguration.UseCppDebuggerAuto">true</value>
     <value type="bool" key="RunConfiguration.UseLibrarySearchPath">true</value>

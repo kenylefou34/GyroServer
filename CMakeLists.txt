@@ -20,6 +20,7 @@ set(SRC_DIR src)
 set(APPS_DIR apps)
 set(UI_DIR ui)
 set(UDP_DIR udp)
+set(TCP_DIR tcp)
 
 set(PROJECT_SOURCES
         ${SRC_DIR}/${APPS_DIR}/main.cpp
@@ -28,6 +29,8 @@ set(PROJECT_SOURCES
         ${SRC_DIR}/${UI_DIR}/mainwindow.ui
         ${SRC_DIR}/${UDP_DIR}/client.cpp
         ${SRC_DIR}/${UDP_DIR}/client.hpp
+        ${SRC_DIR}/${TCP_DIR}/server.cpp
+        ${SRC_DIR}/${TCP_DIR}/server.hpp
         ${TS_FILES}
 )
 

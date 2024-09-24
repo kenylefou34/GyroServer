@@ -1,3 +1,4 @@
+#include "../tcp/server.hpp"
 #include "../udp/client.hpp"
 #include "../ui/mainwindow.h"
 
@@ -8,10 +9,11 @@
 #include <QApplication>
 #include <QLocale>
 #include <QTranslator>
+#include <chrono> // Pour std::chrono::seconds
 #include <cstring>
 #include <fstream>
 #include <iostream>
-#include <thread>
+#include <thread> // Pour std::this_thread::sleep_for
 #include <unistd.h>
 
 // sudo apt-get install qttools5-dev-tools
@@ -30,26 +32,32 @@ int main(int argc, char *argv[])
     }
   }
 
-  if (argc != 6) {
+  if (argc != 3) {
     std::cerr << "Usage: " << argv[0] << " <IP> <Port> <Output file>" << std::endl;
     return 1;
   }
 
   std::string address = argv[1];
   int port = std::stoi(argv[2]);
-  std::string dest_address = argv[3];
-  int dest_port = std::stoi(argv[4]);
-  std::string output_file = argv[5];
 
-  udp::FrameClient udp_frame_listener(address, port, dest_address, dest_port, output_file);
-  udp_frame_listener.read();
+  tcp::FrameReceiverServer tcp_frame_listener(address, port);
 
-  std::thread preview = std::thread([&udp_frame_listener]() {
-    // std::this_thread::sleep_for(std::chrono::milliseconds{500});
-    std::cerr << "Pending thread" << std::endl;
+  std::cout << "Waiting a client connection" << std::endl;
+
+  while (!tcp_frame_listener.connection()) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    std::cout << "Waiting for new connection" << std::endl;
+  }
+
+  std::cout << "Server and client are connected" << std::endl;
+
+  tcp_frame_listener.readFrames();
+
+  std::thread preview = std::thread([&tcp_frame_listener]() {
+    std::cerr << "Pending preview thread" << std::endl;
     int key = 0;
     while (key != 27) {
-      cv::imshow("Preview", udp_frame_listener.getFrame());
+      cv::imshow("Preview", tcp_frame_listener.getFrame());
       key = cv::waitKey(40);
     }
   });
