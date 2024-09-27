@@ -1,5 +1,7 @@
-#ifndef UDP_CLIENT_HPP
-#define UDP_CLIENT_HPP
+#ifndef UDP_SERVER_HPP
+#define UDP_SERVER_HPP
+
+#include "../types/types.hpp"
 
 #include <opencv4/opencv2/core.hpp>
 
@@ -9,9 +11,8 @@
 
 namespace udp {
 
-  class FrameClient {
+  class FrameReceiverServer {
    public:
-    enum EImageFormat : std::uint16_t { BGR_RAW = 0x002A, YUV = 0x01a6 };
     struct FrameStructure {
       auto operator==(const FrameStructure &other) -> bool
       {
@@ -31,38 +32,45 @@ namespace udp {
     };
 
    public:
-    FrameClient(const std::string &address,
-                int port,
-                const std::string &send_address,
-                int send_port,
-                const std::string &output_file);
-    ~FrameClient();
-    void read();
+    FrameReceiverServer(const std::string &server_address, int listening_port);
+    ~FrameReceiverServer();
 
    public:
+    auto connection() -> bool;
+    auto listen() -> void;
     auto getFrame() -> cv::Mat;
 
    private:
-    auto readHeader() -> FrameStructure;
-    auto fillLines(const FrameStructure &frame_info) -> void;
-    auto readLines(FrameStructure frame_info) -> void;
+    auto reallocateBuffer(std::size_t size) -> void;
+    auto buffering() -> ssize_t;
+    auto readHeader() -> bool;
+    auto readData() -> void;
+    auto readYUV() -> void;
+    auto readBGR() -> void;
+    auto readMONO() -> void;
 
     auto debugDataBytes(const std::string &prefix, const std::vector<std::uint8_t> &bytes) -> void;
 
    private:
-    std::string receive_address_;
-    std::string send_address_;
-    int receive_port_;
-    int send_port_;
-    int receive_sockfd_;
-    int send_sockfd_;
-    std::string output_file_;
-    cv::Mat bgr_mat_;
-    cv::Mat yuv_mat_;
-    std::mutex lock_;
-    std::thread receiving_;
+    std::atomic_bool m_close{false};
+
+   private:
+    std::string m_server_address;
+    int m_listening_port;
+    int m_listening_sockfd;
+
+    std::uint8_t *m_buffer = nullptr;
+    std::size_t m_buff_size = 0;
+
+    cv::Mat m_bgr_mat;
+    cv::Mat m_yuv_mat;
+
+    std::mutex m_lock;
+    std::thread m_listening_thread;
+
+    FrameStructure m_frame_info;
   };
 
 } // namespace udp
 
-#endif // UDP_RECORDER_HPP
+#endif // UDP_SERVER_HPP

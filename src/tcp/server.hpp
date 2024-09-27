@@ -1,5 +1,7 @@
-#ifndef UDP_CLIENT_HPP
-#define UDP_CLIENT_HPP
+#ifndef TCP_SERVER_HPP
+#define TCP_SERVER_HPP
+
+#include "../types/types.hpp"
 
 #include <opencv4/opencv2/core.hpp>
 
@@ -11,12 +13,6 @@ namespace tcp {
 
   class FrameReceiverServer {
    public:
-    enum EImageFormat : std::uint16_t {
-      NONE = 0x0000,
-      BGR_RAW = 0x002a,
-      MONO = 0x001a,
-      YUV = 0x01a6
-    };
     struct FrameStructure {
       auto operator==(const FrameStructure &other) -> bool
       {
@@ -67,4 +63,4 @@ namespace tcp {
 
 } // namespace tcp
 
-#endif // UDP_RECORDER_HPP
+#endif // TCP_SERVER_HPP

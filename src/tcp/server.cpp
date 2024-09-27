@@ -8,7 +8,6 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 
-#include <cstdint> // For uint8_t
 #include <cstring>
 #include <fcntl.h>
 #include <fstream>
@@ -19,7 +18,9 @@
 
 using namespace tcp;
 
-#define BUFFER_SIZE 1024
+#define TCP_SOCKET_BUFFER_BYTES 212992
+
+#define BUFFER_SIZE TCP_SOCKET_BUFFER_BYTES
 #define N_MAX_CONNECTION_ATTEMPT 3
 #define CONNECTION_TIMEOUT 60 // Timeout in seconds
 #define DEBUG_DATA false
@@ -261,8 +262,8 @@ void FrameReceiverServer::readYUV()
       std::lock_guard<std::mutex> lk(m_lock);
       // Get row data
       auto start_pos = n_rows * m_yuv_mat.cols;
-      for (std::size_t pos = 0; pos < len; ++pos) {
-        m_yuv_mat.at<uchar>(start_pos + pos) = data_buffer[pos];
+      for (const auto &val : data_buffer) {
+        m_yuv_mat.at<uchar>(start_pos++) = val;
       }
       ++n_rows;
     }
@@ -294,8 +295,8 @@ void FrameReceiverServer::readBGR()
         std::lock_guard<std::mutex> lk(m_lock);
         // Get row data
         auto start_pos = n_rows * m_bgr_mat.cols;
-        for (std::size_t pos = 0; pos < len; ++pos) {
-          m_bgr_mat.at<cv::Vec3b>(start_pos + pos)[c] = data_buffer[pos];
+        for (const auto &val : data_buffer) {
+          m_bgr_mat.at<cv::Vec3b>(start_pos++)[c] = val;
         }
         ++n_rows;
       }
@@ -327,9 +328,8 @@ void FrameReceiverServer::readMONO()
       std::lock_guard<std::mutex> lk(m_lock);
       // Get row data
       auto start_pos = n_rows * m_bgr_mat.cols;
-      for (std::size_t pos = 0; pos < len; ++pos) {
-        const auto val = data_buffer[pos + 5];
-        m_bgr_mat.at<cv::Vec3b>(start_pos + pos) = cv::Vec3b{val, val, val};
+      for (const auto &val : data_buffer) {
+        m_bgr_mat.at<cv::Vec3b>(start_pos++) = cv::Vec3b{val, val, val};
       }
       ++n_rows;
     }
@@ -358,11 +358,11 @@ cv::Mat FrameReceiverServer::getFrame()
   std::lock_guard<std::mutex> lk(m_lock);
 
   switch (m_frame_info.format) {
-    case FrameReceiverServer::EImageFormat::BGR_RAW:
-    case FrameReceiverServer::EImageFormat::MONO:
-    case FrameReceiverServer::EImageFormat::NONE:
+    case EImageFormat::BGR_RAW:
+    case EImageFormat::MONO:
+    case EImageFormat::NONE:
       break;
-    case FrameReceiverServer::EImageFormat::YUV:
+    case EImageFormat::YUV:
       // Convert NV21 to BGR
       cv::cvtColor(m_yuv_mat, m_bgr_mat, cv::COLOR_YUV2BGR_NV21);
       break;

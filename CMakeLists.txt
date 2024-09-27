@@ -27,8 +27,8 @@ set(PROJECT_SOURCES
         ${SRC_DIR}/${UI_DIR}/mainwindow.cpp
         ${SRC_DIR}/${UI_DIR}/mainwindow.h
         ${SRC_DIR}/${UI_DIR}/mainwindow.ui
-        ${SRC_DIR}/${UDP_DIR}/client.cpp
-        ${SRC_DIR}/${UDP_DIR}/client.hpp
+        ${SRC_DIR}/${UDP_DIR}/server.cpp
+        ${SRC_DIR}/${UDP_DIR}/server.hpp
         ${SRC_DIR}/${TCP_DIR}/server.cpp
         ${SRC_DIR}/${TCP_DIR}/server.hpp
         ${TS_FILES}
