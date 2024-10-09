@@ -1,14 +1,10 @@
 #include "../tcp/server.hpp"
 #include "../udp/server.hpp"
-#include "../ui/mainwindow.h"
 
 #include <arpa/inet.h>
 #include <opencv2/opencv.hpp>
 #include <sys/socket.h>
 
-#include <QApplication>
-#include <QLocale>
-#include <QTranslator>
 #include <chrono> // Pour std::chrono::seconds
 #include <cstring>
 #include <fstream>
@@ -20,18 +16,6 @@
 
 int main(int argc, char *argv[])
 {
-  QApplication a(argc, argv);
-
-  QTranslator translator;
-  const QStringList uiLanguages = QLocale::system().uiLanguages();
-  for (const QString &locale : uiLanguages) {
-    const QString baseName = "GyroClient_" + QLocale(locale).name();
-    if (translator.load(":/i18n/" + baseName)) {
-      a.installTranslator(&translator);
-      break;
-    }
-  }
-
   if (argc != 3) {
     std::cerr << "Usage: " << argv[0] << " <IP> <Port> <Output file>" << std::endl;
     return 1;
@@ -85,7 +69,5 @@ int main(int argc, char *argv[])
   });
 #endif
 
-  MainWindow w;
-  w.show();
-  return a.exec();
+  return 0;
 }
