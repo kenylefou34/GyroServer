@@ -12,13 +12,51 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
+#define MAX_PRIORITY 6                  // For SO_PRIORITY, higher numbers represent higher priority
+#define RECV_TOS_PRIORITY_TRAFFIC 0x10; // TOS = 16 (low delay)
+#define RECV_BUFFER_SIZE 212992;        // Taille du tampon de réception
 #define PORT 50000
 #define BUFFER_SIZE 1200 // Max size of UDP packet
+#define HEADER_BUFFER_SIZE 32
+#define DEBUG_DATA 0
+
+bool g_sps_and_pps_read{false};
+
+void readSPSandPPS(AVCodecContext *codecContext, std::vector<uint8_t> sps, std::vector<uint8_t> pps)
+{
+  if (g_sps_and_pps_read) {
+    return;
+  }
+
+  // Encapsuler SPS dans un AVPacket
+  AVPacket *spsPacket = av_packet_alloc();
+  spsPacket->data = sps.data();
+  spsPacket->size = sps.size();
+
+  // Envoyer le SPS au décodeur
+  if (avcodec_send_packet(codecContext, spsPacket) < 0) {
+    std::cerr << "Erreur lors de l'envoi du paquet SPS au décodeur" << std::endl;
+  }
+  av_packet_free(&spsPacket);
+
+  // Encapsuler PPS dans un AVPacket
+  AVPacket *ppsPacket = av_packet_alloc();
+  ppsPacket->data = pps.data();
+  ppsPacket->size = pps.size();
+
+  // Envoyer le PPS au décodeur
+  if (avcodec_send_packet(codecContext, ppsPacket) < 0) {
+    std::cerr << "Erreur lors de l'envoi du paquet PPS au décodeur" << std::endl;
+  }
+  av_packet_free(&ppsPacket);
+
+  g_sps_and_pps_read = true;
+}
 
 auto readHeader(char *buffer) -> bool
 {
   // Copy buffer
-  std::vector<std::uint8_t> header_buffer(buffer, buffer + BUFFER_SIZE / sizeof(char));
+  std::vector<std::uint8_t> header_buffer(buffer, buffer + HEADER_BUFFER_SIZE / sizeof(char));
 
   // Example:
   // [begin_code] [encoding] [width] [height] [frame_id] [ecc]
@@ -69,12 +107,25 @@ auto readHeader(char *buffer) -> bool
   return false;
 }
 
+void debugDataBytes(const std::string &prefix, const std::vector<uint8_t> &bytes)
+{
+#if DEBUG_DATA
+  std::cout << prefix << " [";
+  for (auto byte : bytes) {
+    std::cout << "0x" << std::hex << static_cast<int>(byte) << " ";
+  }
+  std::cout << "]" << std::endl;
+#endif
+}
+
 int main()
 {
   int sockfd;
   struct sockaddr_in serverAddr, clientAddr;
-  char buffer[BUFFER_SIZE];
   socklen_t addrLen = sizeof(clientAddr);
+
+  char buffer[BUFFER_SIZE];
+  memset(buffer, 0, BUFFER_SIZE);
 
   // Initialize FFmpeg network components
   avformat_network_init();
@@ -93,6 +144,32 @@ int main()
 
   if (bind(sockfd, (const struct sockaddr *) &serverAddr, sizeof(serverAddr)) < 0) {
     perror("bind failed");
+    close(sockfd);
+    return -1;
+  }
+
+  // Set the maximum Type of Service (ToS) for high priority traffic (0x10 for minimum delay)
+  int ToS = RECV_TOS_PRIORITY_TRAFFIC;
+  if (setsockopt(sockfd, IPPROTO_IP, IP_TOS, &ToS, sizeof(ToS)) < 0) {
+    std::cerr << "Error setting IP_TOS." << std::endl;
+  }
+  else {
+    std::cout << "Set IP_TOS to " << ToS << " for low delay." << std::endl;
+  }
+
+  // Set the socket priority (SO_PRIORITY)
+  int priority = MAX_PRIORITY; // Maximum priority for Linux (6 is max priority for SO_PRIORITY)
+  if (setsockopt(sockfd, SOL_SOCKET, SO_PRIORITY, &priority, sizeof(priority)) < 0) {
+    std::cerr << "Error setting SO_PRIORITY." << std::endl;
+  }
+  else {
+    std::cout << "Set SO_PRIORITY to " << MAX_PRIORITY << " (maximum priority)." << std::endl;
+  }
+
+  // Configurer la taille du tampon de réception
+  int buffer_size = RECV_BUFFER_SIZE;
+  if (setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &buffer_size, sizeof(buffer_size)) < 0) {
+    std::cerr << "Erreur lors de la configuration du tampon de réception." << std::endl;
     close(sockfd);
     return -1;
   }
@@ -135,18 +212,33 @@ int main()
   // OpenCV window to display the frames
   cv::namedWindow("H264 Stream", cv::WINDOW_AUTOSIZE);
 
+  std::cerr << "Looking for header..." << std::endl;
+  bool header_ok = false;
   do {
-    std::cerr << "Looking for header..." << std::endl;
-    bool header_ok = false;
-    do {
-      ssize_t recvLen =
-          recvfrom(sockfd, buffer, BUFFER_SIZE, 0, (struct sockaddr *) &clientAddr, &addrLen);
+    while (!header_ok) {
+      ssize_t recvLen = recvfrom(
+          sockfd, buffer, HEADER_BUFFER_SIZE, 0, (struct sockaddr *) &clientAddr, &addrLen);
       if (recvLen < 0) {
         perror("recvfrom failed");
         break;
       }
       header_ok = readHeader(buffer);
-    } while (!header_ok);
+    }
+
+#if 1
+    // I got the header so I try to read SPS & PPS
+    ssize_t recvLen =
+        recvfrom(sockfd, buffer, HEADER_BUFFER_SIZE, 0, (struct sockaddr *) &clientAddr, &addrLen);
+    std::vector<uint8_t> tmp_sps_buffer(buffer, buffer + recvLen);
+    memset(buffer, 0, HEADER_BUFFER_SIZE);
+
+    recvLen =
+        recvfrom(sockfd, buffer, HEADER_BUFFER_SIZE, 0, (struct sockaddr *) &clientAddr, &addrLen);
+    std::vector<uint8_t> tmp_pps_buffer(buffer, buffer + recvLen);
+    memset(buffer, 0, HEADER_BUFFER_SIZE);
+
+    readSPSandPPS(codecContext, tmp_sps_buffer, tmp_pps_buffer);
+#endif
 
     // Get the full frame until the next header
     std::cerr << "Getting h264 frame data..." << std::endl;
@@ -167,6 +259,8 @@ int main()
       }
     } while (true);
 
+    debugDataBytes("New Frame", data_buffer);
+
     std::cerr << "End of frame data..." << std::endl;
 
     // Create an AVPacket and initialize it
@@ -177,11 +271,10 @@ int main()
     }
 
     // Set data and size for the packet
-    packet->data = &data_buffer[0];
+    packet->data = data_buffer.data();
     packet->size = data_buffer.size();
 
     // Send the packet to the decoder
-    avcodec_send_packet(codecContext, packet);
     if (avcodec_send_packet(codecContext, packet) < 0) {
       std::cerr << "Error sending packet for decoding\n";
       av_packet_free(&packet); // Free packet if send failed
