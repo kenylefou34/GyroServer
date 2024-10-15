@@ -4,6 +4,7 @@
 #include <sys/socket.h>
 
 #include <iostream>
+#include <thread>
 #include <unistd.h>
 
 extern "C" {
@@ -15,9 +16,13 @@ extern "C" {
 #define MAX_PRIORITY 6                  // For SO_PRIORITY, higher numbers represent higher priority
 #define RECV_TOS_PRIORITY_TRAFFIC 0x10; // TOS = 16 (low delay)
 #define RECV_BUFFER_SIZE 212992;        // Taille du tampon de réception
-#define PORT 50000
-#define BUFFER_SIZE 1200 // Max size of UDP packet
+#define FRAME_PORT 50000
+#define FRAME_BUFFER_MTU 1200 // Max size of UDP packet
 #define HEADER_BUFFER_SIZE 32
+
+#define ACCELEROMETER_PORT 50002
+#define ACCELEROMETER_BUFFER_MTU 64 // Max size of UDP packet
+
 #define DEBUG_DATA 0
 
 bool g_sps_and_pps_read{false};
@@ -95,8 +100,10 @@ auto readHeader(char *buffer) -> bool
     ecc += header_buffer[i++];
     const uint16_t computed_ecc = (code * code + frame_encoding) / (width * 3 - height) * 100;
     if (computed_ecc == ecc) {
+      /*
       std::cout << "Header of frame " << frame_id << " validation successfull: " << ecc
                 << std::endl;
+      */
       return true;
     }
     else {
@@ -118,14 +125,95 @@ void debugDataBytes(const std::string &prefix, const std::vector<uint8_t> &bytes
 #endif
 }
 
+double vectorToDouble(std::vector<uint8_t> byteVector)
+{
+  std::reverse(byteVector.begin(), byteVector.end());
+
+  double value = 0.;
+  // Copy the bytes into the double variable
+  if (byteVector.size() == sizeof(double)) {
+    std::memcpy(&value, byteVector.data(), sizeof(double));
+  }
+  else if (byteVector.size() == sizeof(float)) {
+    float value_f = 0.F;
+    std::memcpy(&value_f, byteVector.data(), sizeof(float));
+    value = static_cast<double>(value_f);
+  }
+  else {
+    throw std::out_of_range("byteVector size (" + std::to_string(byteVector.size()) +
+                            ") does not match with double (" + std::to_string(sizeof(double)) +
+                            ")or float (" + std::to_string(sizeof(float)) + ")");
+  }
+
+  return value;
+}
+
+void receiveAccelerometerData(double &linearAccelerationX,
+                              double &linearAccelerationY,
+                              double &linearAccelerationZ)
+{
+  int sockfd;
+  struct sockaddr_in serverAddr, clientAddr;
+  socklen_t addrLen = sizeof(clientAddr);
+
+  char buffer[ACCELEROMETER_BUFFER_MTU];
+  memset(buffer, 0, ACCELEROMETER_BUFFER_MTU);
+
+  // Initialize FFmpeg network components
+  avformat_network_init();
+
+  // Create UDP socket
+  if ((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
+    perror("socket creation failed");
+    return;
+  }
+
+  // Bind the socket to an IP address and port
+  memset(&serverAddr, 0, sizeof(serverAddr));
+  serverAddr.sin_family = AF_INET;
+  serverAddr.sin_addr.s_addr = INADDR_ANY;
+  serverAddr.sin_port = htons(ACCELEROMETER_PORT);
+
+  if (bind(sockfd, (const struct sockaddr *) &serverAddr, sizeof(serverAddr)) < 0) {
+    perror("bind failed");
+    close(sockfd);
+    return;
+  }
+
+  while (true) {
+    ssize_t recvLen = recvfrom(
+        sockfd, buffer, ACCELEROMETER_BUFFER_MTU, 0, (struct sockaddr *) &clientAddr, &addrLen);
+    if (recvLen < 0) {
+      perror("recvfrom failed");
+      continue;
+    }
+    std::vector<uint8_t> tmp_accelerometer_buffer(buffer, buffer + recvLen);
+    memset(buffer, 0, ACCELEROMETER_BUFFER_MTU);
+
+    auto unit_size = recvLen / 3;
+    std::vector<uint8_t> x_acceleration_buffer(tmp_accelerometer_buffer.begin(),
+                                               tmp_accelerometer_buffer.begin() + unit_size);
+    std::vector<uint8_t> y_acceleration_buffer(tmp_accelerometer_buffer.begin() + unit_size,
+                                               tmp_accelerometer_buffer.begin() + 2 * unit_size);
+    std::vector<uint8_t> z_acceleration_buffer(tmp_accelerometer_buffer.begin() + 2 * unit_size,
+                                               tmp_accelerometer_buffer.end());
+
+    linearAccelerationX = vectorToDouble(x_acceleration_buffer);
+    linearAccelerationY = vectorToDouble(y_acceleration_buffer);
+    linearAccelerationZ = vectorToDouble(z_acceleration_buffer);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+}
+
 int main()
 {
   int sockfd;
   struct sockaddr_in serverAddr, clientAddr;
   socklen_t addrLen = sizeof(clientAddr);
 
-  char buffer[BUFFER_SIZE];
-  memset(buffer, 0, BUFFER_SIZE);
+  char buffer[FRAME_BUFFER_MTU];
+  memset(buffer, 0, FRAME_BUFFER_MTU);
 
   // Initialize FFmpeg network components
   avformat_network_init();
@@ -140,7 +228,7 @@ int main()
   memset(&serverAddr, 0, sizeof(serverAddr));
   serverAddr.sin_family = AF_INET;
   serverAddr.sin_addr.s_addr = INADDR_ANY;
-  serverAddr.sin_port = htons(PORT);
+  serverAddr.sin_port = htons(FRAME_PORT);
 
   if (bind(sockfd, (const struct sockaddr *) &serverAddr, sizeof(serverAddr)) < 0) {
     perror("bind failed");
@@ -173,6 +261,11 @@ int main()
     close(sockfd);
     return -1;
   }
+
+  double linearAccX, linearAccY, linearAccZ;
+  std::thread accThread([&linearAccX, &linearAccY, &linearAccZ] {
+    receiveAccelerometerData(linearAccX, linearAccY, linearAccZ);
+  });
 
   // Find the H.264 codec
   AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_H264);
@@ -207,7 +300,7 @@ int main()
     return -1;
   }
 
-  std::cout << "Listening on port " << PORT << " for UDP packets...\n";
+  std::cout << "Listening on port " << FRAME_PORT << " for UDP packets...\n";
 
   // OpenCV window to display the frames
   cv::namedWindow("H264 Stream", cv::WINDOW_AUTOSIZE);
@@ -225,27 +318,33 @@ int main()
       header_ok = readHeader(buffer);
     }
 
-#if 1
     // I got the header so I try to read SPS & PPS
     ssize_t recvLen =
         recvfrom(sockfd, buffer, HEADER_BUFFER_SIZE, 0, (struct sockaddr *) &clientAddr, &addrLen);
+    if (recvLen < 0) {
+      perror("recvfrom failed");
+      continue;
+    }
     std::vector<uint8_t> tmp_sps_buffer(buffer, buffer + recvLen);
     memset(buffer, 0, HEADER_BUFFER_SIZE);
 
     recvLen =
         recvfrom(sockfd, buffer, HEADER_BUFFER_SIZE, 0, (struct sockaddr *) &clientAddr, &addrLen);
+    if (recvLen < 0) {
+      perror("recvfrom failed");
+      continue;
+    }
     std::vector<uint8_t> tmp_pps_buffer(buffer, buffer + recvLen);
     memset(buffer, 0, HEADER_BUFFER_SIZE);
 
     readSPSandPPS(codecContext, tmp_sps_buffer, tmp_pps_buffer);
-#endif
 
     // Get the full frame until the next header
-    std::cerr << "Getting h264 frame data..." << std::endl;
+    // std::cerr << "Getting h264 frame data..." << std::endl;
     std::vector<uint8_t> data_buffer;
     do {
       ssize_t recvLen =
-          recvfrom(sockfd, buffer, BUFFER_SIZE, 0, (struct sockaddr *) &clientAddr, &addrLen);
+          recvfrom(sockfd, buffer, FRAME_BUFFER_MTU, 0, (struct sockaddr *) &clientAddr, &addrLen);
       if (recvLen < 0) {
         perror("recvfrom failed");
         break;
@@ -261,7 +360,7 @@ int main()
 
     debugDataBytes("New Frame", data_buffer);
 
-    std::cerr << "End of frame data..." << std::endl;
+    // std::cerr << "End of frame data..." << std::endl;
 
     // Create an AVPacket and initialize it
     AVPacket *packet = av_packet_alloc();
@@ -283,8 +382,8 @@ int main()
 
     // Receive the decoded frame
     if (avcodec_receive_frame(codecContext, frame) == 0) {
-      std::cout << "avcodec_receive_frame: " << frame->width << "x" << frame->height << std::endl;
-      // Convert the decoded frame to a format suitable for OpenCV (BGR24)
+      // std::cout << "avcodec_receive_frame: " << frame->width << "x" << frame->height <<
+      // std::endl; Convert the decoded frame to a format suitable for OpenCV (BGR24)
       SwsContext *swsCtx = sws_getContext(frame->width,
                                           frame->height,
                                           codecContext->pix_fmt,
@@ -304,6 +403,15 @@ int main()
 
       sws_scale(swsCtx, frame->data, frame->linesize, 0, frame->height, dest, linesize);
       sws_freeContext(swsCtx);
+
+      cv::putText(img,
+                  std::string("X: " + std::to_string(linearAccX) + " - Y: " +
+                              std::to_string(linearAccY) + " - Z: " + std::to_string(linearAccZ)),
+                  cv::Point2i(30, 30),
+                  cv::FONT_HERSHEY_SIMPLEX,
+                  1,
+                  cv::Scalar(0, 255, 0),
+                  2);
 
       // Display the frame using OpenCV
       cv::imshow("H264 Stream", img);
