@@ -1,3 +1,5 @@
+#include "../decoder/avdecoder.hpp"
+
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <opencv2/opencv.hpp>
@@ -6,59 +8,78 @@
 #include <iostream>
 #include <thread>
 #include <unistd.h>
-
-extern "C" {
-#include <libavcodec/avcodec.h>
-#include <libavformat/avformat.h>
-#include <libswscale/swscale.h>
-}
+#include <vector>
 
 #define MAX_PRIORITY 6                  // For SO_PRIORITY, higher numbers represent higher priority
 #define RECV_TOS_PRIORITY_TRAFFIC 0x10; // TOS = 16 (low delay)
 #define RECV_BUFFER_SIZE 212992;        // Taille du tampon de réception
 #define FRAME_PORT 50000
-#define FRAME_BUFFER_MTU 1200 // Max size of UDP packet
+#define FRAME_BUFFER_MTU 1280 // Max size of UDP packet
 #define HEADER_BUFFER_SIZE 32
 
-#define ACCELEROMETER_PORT 50002
-#define ACCELEROMETER_BUFFER_MTU 64 // Max size of UDP packet
+#define ACCELEROMETER_BUFFER_SIZE 64 // Max size of UDP packet
 
 #define DEBUG_DATA 0
 
-bool g_sps_and_pps_read{false};
+struct FrameHeader {
+ private:
+  bool is_valid = false;
+  std::uint8_t code = 0xb8;
 
-void readSPSandPPS(AVCodecContext *codecContext, std::vector<uint8_t> sps, std::vector<uint8_t> pps)
-{
-  if (g_sps_and_pps_read) {
-    return;
+ public:
+  std::uint16_t frame_encoding = 0;
+  std::uint16_t width = 0;
+  std::uint16_t height = 0;
+  std::uint16_t frame_id = 0;
+  std::uint32_t encoded_total_size = 0;
+
+ public:
+  void unvalidate() { is_valid = false; }
+  void validateECC(const uint8_t ecc_to_test)
+  {
+    int iframe_encoding = static_cast<int>(frame_encoding);
+    int iwidth = static_cast<int>(width);
+    int iheight = static_cast<int>(height);
+    int iframe_id = static_cast<int>(frame_id);
+    int iencoded_total_size = static_cast<int>(encoded_total_size);
+
+    uint8_t ecc = code; // Start with the least significant byte of 'code'
+
+    // XOR each byte of the fields to accumulate parity
+    ecc ^= static_cast<uint8_t>(iframe_encoding & 0xFF);
+    ecc ^= static_cast<uint8_t>((iframe_encoding >> 8) & 0xFF);
+    ecc ^= static_cast<uint8_t>((iframe_encoding >> 16) & 0xFF);
+    ecc ^= static_cast<uint8_t>((iframe_encoding >> 24) & 0xFF);
+
+    ecc ^= static_cast<uint8_t>(iwidth & 0xFF);
+    ecc ^= static_cast<uint8_t>((iwidth >> 8) & 0xFF);
+    ecc ^= static_cast<uint8_t>((iwidth >> 16) & 0xFF);
+    ecc ^= static_cast<uint8_t>((iwidth >> 24) & 0xFF);
+
+    ecc ^= static_cast<uint8_t>(iheight & 0xFF);
+    ecc ^= static_cast<uint8_t>((iheight >> 8) & 0xFF);
+    ecc ^= static_cast<uint8_t>((iheight >> 16) & 0xFF);
+    ecc ^= static_cast<uint8_t>((iheight >> 24) & 0xFF);
+
+    ecc ^= static_cast<uint8_t>(iframe_id & 0xFF);
+    ecc ^= static_cast<uint8_t>((iframe_id >> 8) & 0xFF);
+    ecc ^= static_cast<uint8_t>((iframe_id >> 16) & 0xFF);
+    ecc ^= static_cast<uint8_t>((iframe_id >> 24) & 0xFF);
+
+    ecc ^= static_cast<uint8_t>(iencoded_total_size & 0xFF);
+    ecc ^= static_cast<uint8_t>((iencoded_total_size >> 8) & 0xFF);
+    ecc ^= static_cast<uint8_t>((iencoded_total_size >> 16) & 0xFF);
+    ecc ^= static_cast<uint8_t>((iencoded_total_size >> 24) & 0xFF);
+
+    is_valid = true; // = (ecc_to_test == ecc);
   }
 
-  // Encapsuler SPS dans un AVPacket
-  AVPacket *spsPacket = av_packet_alloc();
-  spsPacket->data = sps.data();
-  spsPacket->size = sps.size();
+ public:
+  inline bool isValidEcc() const { return is_valid; }
+  inline std::uint8_t beginCode() const { return code; }
+};
 
-  // Envoyer le SPS au décodeur
-  if (avcodec_send_packet(codecContext, spsPacket) < 0) {
-    std::cerr << "Erreur lors de l'envoi du paquet SPS au décodeur" << std::endl;
-  }
-  av_packet_free(&spsPacket);
-
-  // Encapsuler PPS dans un AVPacket
-  AVPacket *ppsPacket = av_packet_alloc();
-  ppsPacket->data = pps.data();
-  ppsPacket->size = pps.size();
-
-  // Envoyer le PPS au décodeur
-  if (avcodec_send_packet(codecContext, ppsPacket) < 0) {
-    std::cerr << "Erreur lors de l'envoi du paquet PPS au décodeur" << std::endl;
-  }
-  av_packet_free(&ppsPacket);
-
-  g_sps_and_pps_read = true;
-}
-
-auto readHeader(char *buffer) -> bool
+auto readHeader(char *buffer, FrameHeader &fh) -> void
 {
   // Copy buffer
   std::vector<std::uint8_t> header_buffer(buffer, buffer + HEADER_BUFFER_SIZE / sizeof(char));
@@ -71,47 +92,36 @@ auto readHeader(char *buffer) -> bool
   std::uint8_t code = header_buffer[i++];
 
   // begin of frame code is 0xb8
-  if (code == 0xb8) {
+  if (code == fh.beginCode()) {
     // Deduce frame format encoding
-    uint16_t frame_encoding = 0;
-    uint16_t width = 0;
-    uint16_t height = 0;
-    uint16_t frame_id = 0;
-    uint16_t ecc = 0;
 
     // get frame encoding
-    frame_encoding = header_buffer[i++] << 8;
-    frame_encoding += header_buffer[i++];
+    fh.frame_encoding = header_buffer[i++] << 8;
+    fh.frame_encoding += header_buffer[i++];
 
     // get width
-    width = header_buffer[i++] << 8;
-    width += header_buffer[i++];
+    fh.width = header_buffer[i++] << 8;
+    fh.width += header_buffer[i++];
 
     // get height
-    height = header_buffer[i++] << 8;
-    height += header_buffer[i++];
+    fh.height = header_buffer[i++] << 8;
+    fh.height += header_buffer[i++];
 
     // get frame id
-    frame_id = header_buffer[i++] << 8;
-    frame_id += header_buffer[i++];
+    fh.frame_id = header_buffer[i++] << 8;
+    fh.frame_id += header_buffer[i++];
+
+    // get encoded frame total size
+    fh.encoded_total_size = header_buffer[i++] << 24;
+    fh.encoded_total_size += header_buffer[i++] << 16;
+    fh.encoded_total_size += header_buffer[i++] << 8;
+    fh.encoded_total_size += header_buffer[i++];
 
     // get validation ecc code
-    ecc = header_buffer[i++] << 8;
-    ecc += header_buffer[i++];
-    const uint16_t computed_ecc = (code * code + frame_encoding) / (width * 3 - height) * 100;
-    if (computed_ecc == ecc) {
-      /*
-      std::cout << "Header of frame " << frame_id << " validation successfull: " << ecc
-                << std::endl;
-      */
-      return true;
-    }
-    else {
-      std::cerr << "Failed to validate ECC: " << ecc << std::endl;
-    }
-  }
+    std::uint8_t ecc = header_buffer[i++];
 
-  return false;
+    fh.validateECC(ecc);
+  }
 }
 
 void debugDataBytes(const std::string &prefix, const std::vector<uint8_t> &bytes)
@@ -140,70 +150,34 @@ double vectorToDouble(std::vector<uint8_t> byteVector)
     value = static_cast<double>(value_f);
   }
   else {
-    throw std::out_of_range("byteVector size (" + std::to_string(byteVector.size()) +
-                            ") does not match with double (" + std::to_string(sizeof(double)) +
-                            ")or float (" + std::to_string(sizeof(float)) + ")");
+    std::cout << "byteVector size (" << std::to_string(byteVector.size())
+              << ") does not match with double (" << std::to_string(sizeof(double)) << ")or float ("
+              << std::to_string(sizeof(float)) + ")" << std::endl;
   }
 
   return value;
 }
 
-void receiveAccelerometerData(double &linearAccelerationX,
-                              double &linearAccelerationY,
-                              double &linearAccelerationZ)
+void readAccelerometerData(double &linearAccelerationX,
+                           double &linearAccelerationY,
+                           double &linearAccelerationZ,
+                           const std::vector<uint8_t> &accelero_data)
 {
-  int sockfd;
-  struct sockaddr_in serverAddr, clientAddr;
-  socklen_t addrLen = sizeof(clientAddr);
-
-  char buffer[ACCELEROMETER_BUFFER_MTU];
-  memset(buffer, 0, ACCELEROMETER_BUFFER_MTU);
-
-  // Initialize FFmpeg network components
-  avformat_network_init();
-
-  // Create UDP socket
-  if ((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
-    perror("socket creation failed");
+  if (accelero_data.empty()) {
     return;
   }
 
-  // Bind the socket to an IP address and port
-  memset(&serverAddr, 0, sizeof(serverAddr));
-  serverAddr.sin_family = AF_INET;
-  serverAddr.sin_addr.s_addr = INADDR_ANY;
-  serverAddr.sin_port = htons(ACCELEROMETER_PORT);
+  auto unit_size = accelero_data.size() / 3;
+  std::vector<uint8_t> x_acceleration_buffer(accelero_data.begin(),
+                                             accelero_data.begin() + unit_size);
+  std::vector<uint8_t> y_acceleration_buffer(accelero_data.begin() + unit_size,
+                                             accelero_data.begin() + 2 * unit_size);
+  std::vector<uint8_t> z_acceleration_buffer(accelero_data.begin() + 2 * unit_size,
+                                             accelero_data.end());
 
-  if (bind(sockfd, (const struct sockaddr *) &serverAddr, sizeof(serverAddr)) < 0) {
-    perror("bind failed");
-    close(sockfd);
-    return;
-  }
-
-  while (true) {
-    ssize_t recvLen = recvfrom(
-        sockfd, buffer, ACCELEROMETER_BUFFER_MTU, 0, (struct sockaddr *) &clientAddr, &addrLen);
-    if (recvLen < 0) {
-      perror("recvfrom failed");
-      continue;
-    }
-    std::vector<uint8_t> tmp_accelerometer_buffer(buffer, buffer + recvLen);
-    memset(buffer, 0, ACCELEROMETER_BUFFER_MTU);
-
-    auto unit_size = recvLen / 3;
-    std::vector<uint8_t> x_acceleration_buffer(tmp_accelerometer_buffer.begin(),
-                                               tmp_accelerometer_buffer.begin() + unit_size);
-    std::vector<uint8_t> y_acceleration_buffer(tmp_accelerometer_buffer.begin() + unit_size,
-                                               tmp_accelerometer_buffer.begin() + 2 * unit_size);
-    std::vector<uint8_t> z_acceleration_buffer(tmp_accelerometer_buffer.begin() + 2 * unit_size,
-                                               tmp_accelerometer_buffer.end());
-
-    linearAccelerationX = vectorToDouble(x_acceleration_buffer);
-    linearAccelerationY = vectorToDouble(y_acceleration_buffer);
-    linearAccelerationZ = vectorToDouble(z_acceleration_buffer);
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  }
+  linearAccelerationX = vectorToDouble(x_acceleration_buffer);
+  linearAccelerationY = vectorToDouble(y_acceleration_buffer);
+  linearAccelerationZ = vectorToDouble(z_acceleration_buffer);
 }
 
 int main()
@@ -262,40 +236,16 @@ int main()
     return -1;
   }
 
+  // Init accelero data
   double linearAccX, linearAccY, linearAccZ;
-  std::thread accThread([&linearAccX, &linearAccY, &linearAccZ] {
-    receiveAccelerometerData(linearAccX, linearAccY, linearAccZ);
-  });
 
   // Find the H.264 codec
-  AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_H264);
-  if (!codec) {
-    std::cerr << "Codec not found!" << std::endl;
-    close(sockfd);
-    return -1;
+  AVDecoder *decoder_ptr = nullptr;
+  try {
+    decoder_ptr = new AVDecoder();
   }
-
-  // Allocate codec context
-  AVCodecContext *codecContext = avcodec_alloc_context3(codec);
-  if (!codecContext) {
-    std::cerr << "Could not allocate codec context!" << std::endl;
-    close(sockfd);
-    return -1;
-  }
-
-  // Open the codec
-  if (avcodec_open2(codecContext, codec, nullptr) < 0) {
-    std::cerr << "Could not open codec!" << std::endl;
-    avcodec_free_context(&codecContext);
-    close(sockfd);
-    return -1;
-  }
-
-  // Allocate an AVFrame for decoding
-  AVFrame *frame = av_frame_alloc();
-  if (!frame) {
-    std::cerr << "Could not allocate frame!" << std::endl;
-    avcodec_free_context(&codecContext);
+  catch (const std::exception &e) {
+    std::cerr << e.what() << std::endl;
     close(sockfd);
     return -1;
   }
@@ -307,126 +257,123 @@ int main()
 
   std::cerr << "Looking for header..." << std::endl;
   bool header_ok = false;
+  ssize_t receive_len;
+  FrameHeader fh;
   do {
-    while (!header_ok) {
-      ssize_t recvLen = recvfrom(
+    while (fh.isValidEcc()) {
+      receive_len = recvfrom(
           sockfd, buffer, HEADER_BUFFER_SIZE, 0, (struct sockaddr *) &clientAddr, &addrLen);
-      if (recvLen < 0) {
+      if (receive_len < 0) {
         perror("recvfrom failed");
         break;
       }
-      header_ok = readHeader(buffer);
+      readHeader(buffer, fh);
     }
+    fh.unvalidate();
 
     // I got the header so I try to read SPS & PPS
-    ssize_t recvLen =
+
+    // SPS part
+    receive_len =
         recvfrom(sockfd, buffer, HEADER_BUFFER_SIZE, 0, (struct sockaddr *) &clientAddr, &addrLen);
-    if (recvLen < 0) {
+    if (receive_len < 0) {
       perror("recvfrom failed");
       continue;
     }
-    std::vector<uint8_t> tmp_sps_buffer(buffer, buffer + recvLen);
+    std::vector<uint8_t> sps_copy_buffer(buffer, buffer + receive_len);
     memset(buffer, 0, HEADER_BUFFER_SIZE);
 
-    recvLen =
+    // PPS part
+    receive_len =
         recvfrom(sockfd, buffer, HEADER_BUFFER_SIZE, 0, (struct sockaddr *) &clientAddr, &addrLen);
-    if (recvLen < 0) {
+    if (receive_len < 0) {
       perror("recvfrom failed");
       continue;
     }
-    std::vector<uint8_t> tmp_pps_buffer(buffer, buffer + recvLen);
+    std::vector<uint8_t> pps_copy_buffer(buffer, buffer + receive_len);
     memset(buffer, 0, HEADER_BUFFER_SIZE);
 
-    readSPSandPPS(codecContext, tmp_sps_buffer, tmp_pps_buffer);
+    // Decoding SPS & PPS
+    try {
+      if (!decoder_ptr->readSPSandPPS(sps_copy_buffer, pps_copy_buffer)) {
+        std::cerr << "Erreur lors de l'envoi du paquet SPS ou PPS au décodeur" << std::endl;
+      }
+    }
+    catch (const std::exception &e) {
+      std::cerr << e.what() << std::endl;
+      continue;
+    }
+
+    // I got the header & SPS & PPS so I try to read accelerometer data
+    receive_len = recvfrom(
+        sockfd, buffer, ACCELEROMETER_BUFFER_SIZE, 0, (struct sockaddr *) &clientAddr, &addrLen);
+    if (receive_len < 0) {
+      perror("recvfrom failed");
+      continue;
+    }
+    std::vector<uint8_t> tmp_accelero_buffer(buffer, buffer + receive_len);
+    memset(buffer, 0, HEADER_BUFFER_SIZE);
+    readAccelerometerData(linearAccX, linearAccY, linearAccZ, tmp_accelero_buffer);
 
     // Get the full frame until the next header
-    // std::cerr << "Getting h264 frame data..." << std::endl;
     std::vector<uint8_t> data_buffer;
+    ssize_t total = 0;
     do {
-      ssize_t recvLen =
+      receive_len =
           recvfrom(sockfd, buffer, FRAME_BUFFER_MTU, 0, (struct sockaddr *) &clientAddr, &addrLen);
-      if (recvLen < 0) {
+      if (receive_len < 0) {
         perror("recvfrom failed");
         break;
       }
-      if (readHeader(buffer)) {
-        break;
-      }
-      else {
-        std::vector<uint8_t> tmp_buffer(buffer, buffer + recvLen);
-        data_buffer.insert(data_buffer.end(), tmp_buffer.begin(), tmp_buffer.end());
-      }
-    } while (true);
+      std::vector<uint8_t> tmp_buffer(buffer, buffer + receive_len);
+      data_buffer.insert(data_buffer.end(), tmp_buffer.begin(), tmp_buffer.end());
+      total += receive_len;
+    } while (total < fh.encoded_total_size);
 
     debugDataBytes("New Frame", data_buffer);
 
-    // std::cerr << "End of frame data..." << std::endl;
-
-    // Create an AVPacket and initialize it
-    AVPacket *packet = av_packet_alloc();
-    if (!packet) {
-      std::cerr << "Could not allocate AVPacket!" << std::endl;
-      break;
+    bool frame_received{false};
+    try {
+      frame_received = decoder_ptr->receiveFrameBuffer(data_buffer);
+    }
+    catch (const std::exception &e) {
+      std::cerr << e.what() << std::endl;
     }
 
-    // Set data and size for the packet
-    packet->data = data_buffer.data();
-    packet->size = data_buffer.size();
+    if (frame_received) {
+      auto frame_ptr = decoder_ptr->frame();
 
-    // Send the packet to the decoder
-    if (avcodec_send_packet(codecContext, packet) < 0) {
-      std::cerr << "Error sending packet for decoding\n";
-      av_packet_free(&packet); // Free packet if send failed
-      continue;
-    }
+      // The is only 1 plane on BGR frame
+      std::vector<std::uint8_t *> dest(1, nullptr);
+      std::vector<int> linesize(1, 0);
 
-    // Receive the decoded frame
-    if (avcodec_receive_frame(codecContext, frame) == 0) {
-      // std::cout << "avcodec_receive_frame: " << frame->width << "x" << frame->height <<
-      // std::endl; Convert the decoded frame to a format suitable for OpenCV (BGR24)
-      SwsContext *swsCtx = sws_getContext(frame->width,
-                                          frame->height,
-                                          codecContext->pix_fmt,
-                                          frame->width,
-                                          frame->height,
-                                          AV_PIX_FMT_BGR24,
-                                          SWS_BILINEAR,
-                                          nullptr,
-                                          nullptr,
-                                          nullptr);
+      cv::Mat img(frame_ptr->height, frame_ptr->width, CV_8UC3);
 
-      uint8_t *dest[4] = {nullptr};
-      int linesize[4] = {0};
-      cv::Mat img(frame->height, frame->width, CV_8UC3);
       dest[0] = img.data;
       linesize[0] = img.step1();
 
-      sws_scale(swsCtx, frame->data, frame->linesize, 0, frame->height, dest, linesize);
-      sws_freeContext(swsCtx);
+      decoder_ptr->scaleFrame(dest, linesize);
 
       cv::putText(img,
-                  std::string("X: " + std::to_string(linearAccX) + " - Y: " +
-                              std::to_string(linearAccY) + " - Z: " + std::to_string(linearAccZ)),
+                  std::string("Gravity: " + std::to_string(linearAccX) +
+                              " - Roll: " + std::to_string(linearAccY) +
+                              " - Pitch: " + std::to_string(linearAccZ)),
                   cv::Point2i(30, 30),
                   cv::FONT_HERSHEY_SIMPLEX,
-                  1,
+                  0.5,
                   cv::Scalar(0, 255, 0),
-                  2);
+                  1);
 
       // Display the frame using OpenCV
       cv::imshow("H264 Stream", img);
       if (cv::waitKey(1) == 27)
         break; // Exit on 'ESC' key
     }
-
-    // Free the AVPacket
-    av_packet_free(&packet);
-
   } while (true);
 
   // Cleanup
-  av_frame_free(&frame);
-  avcodec_free_context(&codecContext);
+  decoder_ptr->cleanup();
+
   close(sockfd);
   cv::destroyWindow("H264 Stream");
 
