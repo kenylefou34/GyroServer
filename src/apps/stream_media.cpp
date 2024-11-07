@@ -71,7 +71,11 @@ struct FrameHeader {
     ecc ^= static_cast<uint8_t>((iencoded_total_size >> 16) & 0xFF);
     ecc ^= static_cast<uint8_t>((iencoded_total_size >> 24) & 0xFF);
 
-    is_valid = true; // = (ecc_to_test == ecc);
+    is_valid = (ecc_to_test == ecc);
+    if (!is_valid) {
+      std::cerr << "Ecc " << std::hex << ecc_to_test << "unvalidated with value " << ecc << std::dec
+                << std::endl;
+    }
   }
 
  public:
@@ -85,8 +89,8 @@ auto readHeader(char *buffer, FrameHeader &fh) -> void
   std::vector<std::uint8_t> header_buffer(buffer, buffer + HEADER_BUFFER_SIZE / sizeof(char));
 
   // Example:
-  // [begin_code] [encoding] [width] [height] [frame_id] [ecc]
-  // b8           0080       0280    01e0     0023       XXXX
+  // [begin_code] [encoding] [width] [height] [frame_id] [encoded_size] [ecc]
+  // b8           0080       0280    01e0     0023       XXXXXXXX       XX
 
   std::size_t i = 0;
   std::uint8_t code = header_buffer[i++];
@@ -135,7 +139,7 @@ void debugDataBytes(const std::string &prefix, const std::vector<uint8_t> &bytes
 #endif
 }
 
-double vectorToDouble(std::vector<uint8_t> byteVector)
+std::pair<bool, double> vectorToDouble(std::vector<uint8_t> byteVector)
 {
   std::reverse(byteVector.begin(), byteVector.end());
 
@@ -153,18 +157,19 @@ double vectorToDouble(std::vector<uint8_t> byteVector)
     std::cout << "byteVector size (" << std::to_string(byteVector.size())
               << ") does not match with double (" << std::to_string(sizeof(double)) << ")or float ("
               << std::to_string(sizeof(float)) + ")" << std::endl;
+    return std::make_pair(false, value);
   }
 
-  return value;
+  return std::make_pair(true, value);
 }
 
-void readAccelerometerData(double &linearAccelerationX,
+bool readAccelerometerData(double &linearAccelerationX,
                            double &linearAccelerationY,
                            double &linearAccelerationZ,
                            const std::vector<uint8_t> &accelero_data)
 {
   if (accelero_data.empty()) {
-    return;
+    return false;
   }
 
   auto unit_size = accelero_data.size() / 3;
@@ -175,9 +180,17 @@ void readAccelerometerData(double &linearAccelerationX,
   std::vector<uint8_t> z_acceleration_buffer(accelero_data.begin() + 2 * unit_size,
                                              accelero_data.end());
 
-  linearAccelerationX = vectorToDouble(x_acceleration_buffer);
-  linearAccelerationY = vectorToDouble(y_acceleration_buffer);
-  linearAccelerationZ = vectorToDouble(z_acceleration_buffer);
+  auto x = vectorToDouble(x_acceleration_buffer);
+  auto y = vectorToDouble(y_acceleration_buffer);
+  auto z = vectorToDouble(z_acceleration_buffer);
+  if (x.first && y.first && z.first) {
+    linearAccelerationX = x.second;
+    linearAccelerationY = y.second;
+    linearAccelerationZ = z.second;
+    return true;
+  }
+
+  return false;
 }
 
 int main()
@@ -260,7 +273,7 @@ int main()
   ssize_t receive_len;
   FrameHeader fh;
   do {
-    while (fh.isValidEcc()) {
+    while (!fh.isValidEcc()) {
       receive_len = recvfrom(
           sockfd, buffer, HEADER_BUFFER_SIZE, 0, (struct sockaddr *) &clientAddr, &addrLen);
       if (receive_len < 0) {
@@ -295,9 +308,7 @@ int main()
 
     // Decoding SPS & PPS
     try {
-      if (!decoder_ptr->readSPSandPPS(sps_copy_buffer, pps_copy_buffer)) {
-        std::cerr << "Erreur lors de l'envoi du paquet SPS ou PPS au décodeur" << std::endl;
-      }
+      decoder_ptr->readSPSandPPS(sps_copy_buffer, pps_copy_buffer);
     }
     catch (const std::exception &e) {
       std::cerr << e.what() << std::endl;
@@ -313,7 +324,10 @@ int main()
     }
     std::vector<uint8_t> tmp_accelero_buffer(buffer, buffer + receive_len);
     memset(buffer, 0, HEADER_BUFFER_SIZE);
-    readAccelerometerData(linearAccX, linearAccY, linearAccZ, tmp_accelero_buffer);
+    if (!readAccelerometerData(linearAccX, linearAccY, linearAccZ, tmp_accelero_buffer)) {
+      std::cerr << "Erreur lors de la reception des données gyroscopique" << std::endl;
+      continue;
+    }
 
     // Get the full frame until the next header
     std::vector<uint8_t> data_buffer;
@@ -329,6 +343,8 @@ int main()
       data_buffer.insert(data_buffer.end(), tmp_buffer.begin(), tmp_buffer.end());
       total += receive_len;
     } while (total < fh.encoded_total_size);
+
+    // std::cout << "Total receive " << total << "/" << fh.encoded_total_size << std::endl;
 
     debugDataBytes("New Frame", data_buffer);
 
@@ -372,7 +388,11 @@ int main()
   } while (true);
 
   // Cleanup
-  decoder_ptr->cleanup();
+  if (decoder_ptr) {
+    decoder_ptr->cleanup();
+    delete decoder_ptr;
+    decoder_ptr = nullptr;
+  }
 
   close(sockfd);
   cv::destroyWindow("H264 Stream");

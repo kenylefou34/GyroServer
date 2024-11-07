@@ -2,6 +2,7 @@
 #define DECODER_AVDECODER_HPP
 
 #include <iostream>
+#include <iterator>
 #include <stdexcept>
 #include <vector>
 
@@ -43,24 +44,22 @@ class AVDecoder {
   ~AVDecoder() { cleanup(); }
 
  public:
-  inline bool readSPSandPPS(std::vector<std::uint8_t> &sps, std::vector<std::uint8_t> &pps)
+  inline void readSPSandPPS(std::vector<std::uint8_t> &sps, std::vector<std::uint8_t> &pps)
   {
-    if (m_is_sps_pps_submitted) {
-      return false;
-    }
-
-    if (!m_codec_context) {
-      return false;
+    if (m_is_sps_pps_submitted || !m_codec_context) {
+      return;
     }
 
     // Encapsuler SPS dans un AVPacket
     AVPacket *sps_packet = av_packet_alloc();
     sps_packet->data = sps.data();
     sps_packet->size = sps.size();
-
     // Envoyer le SPS au décodeur
     if (avcodec_send_packet(m_codec_context, sps_packet) < 0) {
-      return false;
+      /* std::cerr << "Erreur lors de l'envoi du paquet SPS au décodeur: ";
+      std::copy(sps.begin(), sps.end(), std::ostream_iterator<int>(std::cerr, " "));
+      std::cerr << std::endl;
+      m_is_sps_pps_submitted = false; */
     }
     av_packet_free(&sps_packet);
 
@@ -68,15 +67,17 @@ class AVDecoder {
     AVPacket *pps_packet = av_packet_alloc();
     pps_packet->data = pps.data();
     pps_packet->size = pps.size();
-
     // Envoyer le PPS au décodeur
     if (avcodec_send_packet(m_codec_context, pps_packet) < 0) {
-      return false;
+      /* std::cerr << "Erreur lors de l'envoi du paquet PPS au décodeur: ";
+      std::copy(pps.begin(), pps.end(), std::ostream_iterator<int>(std::cerr, " "));
+      std::cerr << std::endl;
+      m_is_sps_pps_submitted = false; */
     }
     av_packet_free(&pps_packet);
 
     m_is_sps_pps_submitted = true;
-    return m_is_sps_pps_submitted;
+    std::cerr << "SPS & PPS OK" << std::endl;
   };
 
   inline bool receiveFrameBuffer(std::vector<std::uint8_t> &data_buffer)
