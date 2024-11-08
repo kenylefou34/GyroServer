@@ -56,10 +56,12 @@ class AVDecoder {
     sps_packet->size = sps.size();
     // Envoyer le SPS au décodeur
     if (avcodec_send_packet(m_codec_context, sps_packet) < 0) {
-      /* std::cerr << "Erreur lors de l'envoi du paquet SPS au décodeur: ";
+#if 0
+      std::cerr << "Erreur lors de l'envoi du paquet SPS au décodeur: ";
       std::copy(sps.begin(), sps.end(), std::ostream_iterator<int>(std::cerr, " "));
       std::cerr << std::endl;
-      m_is_sps_pps_submitted = false; */
+      m_is_sps_pps_submitted = false;
+#endif
     }
     av_packet_free(&sps_packet);
 
@@ -69,10 +71,12 @@ class AVDecoder {
     pps_packet->size = pps.size();
     // Envoyer le PPS au décodeur
     if (avcodec_send_packet(m_codec_context, pps_packet) < 0) {
-      /* std::cerr << "Erreur lors de l'envoi du paquet PPS au décodeur: ";
+#if 0
+      std::cerr << "Erreur lors de l'envoi du paquet PPS au décodeur: ";
       std::copy(pps.begin(), pps.end(), std::ostream_iterator<int>(std::cerr, " "));
       std::cerr << std::endl;
-      m_is_sps_pps_submitted = false; */
+      m_is_sps_pps_submitted = false;
+#endif
     }
     av_packet_free(&pps_packet);
 
@@ -160,14 +164,6 @@ class AVDecoder {
       avcodec_free_context(&m_codec_context);
     }
   };
-
-  // GETTERS & SETTERS
- protected:
-  inline AVCodec *codec() { return m_codec; };
-  inline AVCodecContext *codecContext() { return m_codec_context; };
-
- public:
-  inline AVFrame *frame() { return m_frame; };
 
  private:
   /// Find the H.264 codec

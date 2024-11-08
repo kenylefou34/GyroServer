@@ -357,13 +357,11 @@ int main()
     }
 
     if (frame_received) {
-      auto frame_ptr = decoder_ptr->frame();
-
       // The is only 1 plane on BGR frame
       std::vector<std::uint8_t *> dest(1, nullptr);
       std::vector<int> linesize(1, 0);
 
-      cv::Mat img(frame_ptr->height, frame_ptr->width, CV_8UC3);
+      cv::Mat img(fh.height, fh.width, CV_8UC3);
 
       dest[0] = img.data;
       linesize[0] = img.step1();
