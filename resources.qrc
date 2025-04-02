@@ -1,0 +1,7 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+  <qresource prefix="/">
+    <file>src/shaders/texture.vert</file>
+    <file>src/shaders/texture.frag</file>
+  </qresource>
+</RCC>

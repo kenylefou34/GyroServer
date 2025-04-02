@@ -43,11 +43,32 @@ target_link_libraries(stream_frames
   ${OpenCV_LIBS}
 )
 
+set(CMAKE_AUTOMOC ON) # Enable generation of Qt specific headers to generate .moc files
+# set(CMAKE_AUTORCC ON) # Enable the use of Qt resources system .qrc files
+# set(CMAKE_AUTOUIC ON) # Enable Qt designer .ui files when we use Qt Designer User Interface
+#
+# set(CMAKE_INCLUDE_CURRENT_DIR ON) # Enable to look for headers in the current sources directories and current build directories
+
+# Find Qt 6
+find_package(Qt6 REQUIRED COMPONENTS Core Widgets 3DCore 3DExtras 3DRender OpenGL)
+
 # H264 executable
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(FFMPEG REQUIRED libavcodec libavformat libswscale)
 
-add_executable(stream_media ${SRC_DIR}/${APPS_DIR}/stream_media.cpp)
+set(SOURCES
+    ${SRC_DIR}/${UDP_DIR}/server.cpp
+    ${SRC_DIR}/${TCP_DIR}/server.cpp
+)
+
+# qt_standard_project_setup()
+
+# add_executable(
+qt_add_executable(stream_media
+  ${SRC_DIR}/${APPS_DIR}/stream_media.cpp
+  ${SRC_DIR}/stream/streaming_udp.cpp
+  ${SRC_DIR}/${APPS_DIR}/gl/CustomOpenGLWidget.h
+  ${SRC_DIR}/${APPS_DIR}/gl/CustomOpenGLWidget.cpp)
 
 target_include_directories(stream_media
   PRIVATE
@@ -57,9 +78,24 @@ target_include_directories(stream_media
 target_link_libraries(stream_media
   PRIVATE
   ${OpenCV_LIBS}
+
   ${FFMPEG_LIBRARIES}
   avcodec
   avformat
   avutil
   swscale
+
+  Qt6::Core
+  Qt6::Widgets
+  Qt6::3DCore
+  Qt6::3DExtras
+  Qt6::3DRender
+  Qt6::OpenGL
 )
+
+install(TARGETS stream_media
+    BUNDLE  DESTINATION .
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)
+

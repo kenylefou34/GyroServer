@@ -1,399 +1,141 @@
-#include "../decoder/avdecoder.hpp"
+#include "../stream/streaming_udp.h"
+// #include "gl/CustomOpenGLWidget.h"
+#include "gl/glwidget.h"
+#include "gl/window.h"
 
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <opencv2/opencv.hpp>
-#include <sys/socket.h>
+#include <Qt3DCore/QEntity>
+#include <Qt3DExtras/QCuboidMesh>
+#include <Qt3DExtras/QDiffuseMapMaterial>
+#include <Qt3DExtras/QForwardRenderer>
+#include <Qt3DExtras/QOrbitCameraController>
+#include <Qt3DExtras/QPhongMaterial>
+#include <Qt3DExtras/QPlaneMesh>
+#include <Qt3DExtras/Qt3DWindow>
+#include <Qt3DRender/QCamera>
+#include <Qt3DRender/QFrameGraphNode>
+#include <Qt3DRender/QParameter>
+#include <Qt3DRender/QRenderSettings>
+#include <Qt3DRender/QShaderProgram>
+#include <Qt3DRender/QTexture>
+#include <Qt3DRender/QTextureImage>
 
-#include <iostream>
+#include <QApplication>
+#include <QImage>
+#include <QOpenGLContext>
+#include <QOpenGLFunctions>
+#include <QOpenGLTexture>
+#include <QSurfaceFormat>
+#include <QTimer>
+#include <QWidget>
 #include <thread>
-#include <unistd.h>
-#include <vector>
 
-#define MAX_PRIORITY 6                  // For SO_PRIORITY, higher numbers represent higher priority
-#define RECV_TOS_PRIORITY_TRAFFIC 0x10; // TOS = 16 (low delay)
-#define RECV_BUFFER_SIZE 212992;        // Taille du tampon de réception
-#define FRAME_PORT 50000
-#define FRAME_BUFFER_MTU 1280 // Max size of UDP packet
-#define HEADER_BUFFER_SIZE 32
-
-#define ACCELEROMETER_BUFFER_SIZE 64 // Max size of UDP packet
-
-#define DEBUG_DATA 0
-
-struct FrameHeader {
- private:
-  bool is_valid = false;
-  std::uint8_t code = 0xb8;
-
- public:
-  std::uint16_t frame_encoding = 0;
-  std::uint16_t width = 0;
-  std::uint16_t height = 0;
-  std::uint16_t frame_id = 0;
-  std::uint32_t encoded_total_size = 0;
-
- public:
-  void unvalidate() { is_valid = false; }
-  void validateECC(const uint8_t ecc_to_test)
-  {
-    int iframe_encoding = static_cast<int>(frame_encoding);
-    int iwidth = static_cast<int>(width);
-    int iheight = static_cast<int>(height);
-    int iframe_id = static_cast<int>(frame_id);
-    int iencoded_total_size = static_cast<int>(encoded_total_size);
-
-    uint8_t ecc = code; // Start with the least significant byte of 'code'
-
-    // XOR each byte of the fields to accumulate parity
-    ecc ^= static_cast<uint8_t>(iframe_encoding & 0xFF);
-    ecc ^= static_cast<uint8_t>((iframe_encoding >> 8) & 0xFF);
-    ecc ^= static_cast<uint8_t>((iframe_encoding >> 16) & 0xFF);
-    ecc ^= static_cast<uint8_t>((iframe_encoding >> 24) & 0xFF);
-
-    ecc ^= static_cast<uint8_t>(iwidth & 0xFF);
-    ecc ^= static_cast<uint8_t>((iwidth >> 8) & 0xFF);
-    ecc ^= static_cast<uint8_t>((iwidth >> 16) & 0xFF);
-    ecc ^= static_cast<uint8_t>((iwidth >> 24) & 0xFF);
-
-    ecc ^= static_cast<uint8_t>(iheight & 0xFF);
-    ecc ^= static_cast<uint8_t>((iheight >> 8) & 0xFF);
-    ecc ^= static_cast<uint8_t>((iheight >> 16) & 0xFF);
-    ecc ^= static_cast<uint8_t>((iheight >> 24) & 0xFF);
-
-    ecc ^= static_cast<uint8_t>(iframe_id & 0xFF);
-    ecc ^= static_cast<uint8_t>((iframe_id >> 8) & 0xFF);
-    ecc ^= static_cast<uint8_t>((iframe_id >> 16) & 0xFF);
-    ecc ^= static_cast<uint8_t>((iframe_id >> 24) & 0xFF);
-
-    ecc ^= static_cast<uint8_t>(iencoded_total_size & 0xFF);
-    ecc ^= static_cast<uint8_t>((iencoded_total_size >> 8) & 0xFF);
-    ecc ^= static_cast<uint8_t>((iencoded_total_size >> 16) & 0xFF);
-    ecc ^= static_cast<uint8_t>((iencoded_total_size >> 24) & 0xFF);
-
-    is_valid = (ecc_to_test == ecc);
-    if (!is_valid) {
-      std::cerr << "Ecc " << std::hex << ecc_to_test << "unvalidated with value " << ecc << std::dec
-                << std::endl;
-    }
-  }
-
- public:
-  inline bool isValidEcc() const { return is_valid; }
-  inline std::uint8_t beginCode() const { return code; }
-};
-
-auto readHeader(char *buffer, FrameHeader &fh) -> void
+void setupBackgroundUpdater(CustomOpenGLWidget *oglWidget)
 {
-  // Copy buffer
-  std::vector<std::uint8_t> header_buffer(buffer, buffer + HEADER_BUFFER_SIZE / sizeof(char));
+  QTimer *timer = new QTimer(oglWidget);
+  QObject::connect(timer, &QTimer::timeout, oglWidget, [=]() {
+    QImage image(512, 512, QImage::Format_RGBA8888);
+    image.fill(Qt::blue); // Replace with dynamically updated content
 
-  // Example:
-  // [begin_code] [encoding] [width] [height] [frame_id] [encoded_size] [ecc]
-  // b8           0080       0280    01e0     0023       XXXXXXXX       XX
-
-  std::size_t i = 0;
-  std::uint8_t code = header_buffer[i++];
-
-  // begin of frame code is 0xb8
-  if (code == fh.beginCode()) {
-    // Deduce frame format encoding
-
-    // get frame encoding
-    fh.frame_encoding = header_buffer[i++] << 8;
-    fh.frame_encoding += header_buffer[i++];
-
-    // get width
-    fh.width = header_buffer[i++] << 8;
-    fh.width += header_buffer[i++];
-
-    // get height
-    fh.height = header_buffer[i++] << 8;
-    fh.height += header_buffer[i++];
-
-    // get frame id
-    fh.frame_id = header_buffer[i++] << 8;
-    fh.frame_id += header_buffer[i++];
-
-    // get encoded frame total size
-    fh.encoded_total_size = header_buffer[i++] << 24;
-    fh.encoded_total_size += header_buffer[i++] << 16;
-    fh.encoded_total_size += header_buffer[i++] << 8;
-    fh.encoded_total_size += header_buffer[i++];
-
-    // get validation ecc code
-    std::uint8_t ecc = header_buffer[i++];
-
-    fh.validateECC(ecc);
-  }
+    // Update OpenGL texture with the new QImage
+    oglWidget->updateTexture(image);
+  });
+  timer->start(50); // Update every 50 ms
 }
 
-void debugDataBytes(const std::string &prefix, const std::vector<uint8_t> &bytes)
+void setupBackgroundEntity(Qt3DCore::QEntity *rootEntity, QOpenGLTexture *oglTexture)
 {
-#if DEBUG_DATA
-  std::cout << prefix << " [";
-  for (auto byte : bytes) {
-    std::cout << "0x" << std::hex << static_cast<int>(byte) << " ";
-  }
-  std::cout << "]" << std::endl;
-#endif
+  // Background quad (plane) entity
+  Qt3DCore::QEntity *backgroundEntity = new Qt3DCore::QEntity(rootEntity);
+
+  // Set up a 2D plane mesh for the background
+  Qt3DExtras::QPlaneMesh *planeMesh = new Qt3DExtras::QPlaneMesh();
+  planeMesh->setWidth(10.0f);
+  planeMesh->setHeight(10.0f);
+  backgroundEntity->addComponent(planeMesh);
+
+  // Placeholder Qt 3D texture
+  Qt3DRender::QTexture2D *texture = new Qt3DRender::QTexture2D();
+  texture->setGenerateMipMaps(false);
+
+  // Diffuse material that will use the texture
+  Qt3DExtras::QDiffuseMapMaterial *material = new Qt3DExtras::QDiffuseMapMaterial();
+  material->setDiffuse(texture);
+  backgroundEntity->addComponent(material);
+
+  // Use OpenGL to bind the texture later in a rendering loop
+  oglTexture->setFormat(QOpenGLTexture::RGBA8_UNorm);
+  oglTexture->setSize(512, 512);
+  oglTexture->allocateStorage();
 }
 
-std::pair<bool, double> vectorToDouble(std::vector<uint8_t> byteVector)
+QImage cvMatToQImage(const cv::Mat &mat)
 {
-  std::reverse(byteVector.begin(), byteVector.end());
-
-  double value = 0.;
-  // Copy the bytes into the double variable
-  if (byteVector.size() == sizeof(double)) {
-    std::memcpy(&value, byteVector.data(), sizeof(double));
+  if (mat.type() == CV_8UC3) { // 3-channel image
+    return QImage(mat.data, mat.cols, mat.rows, mat.step, QImage::Format_RGB888).rgbSwapped();
   }
-  else if (byteVector.size() == sizeof(float)) {
-    float value_f = 0.F;
-    std::memcpy(&value_f, byteVector.data(), sizeof(float));
-    value = static_cast<double>(value_f);
+  else if (mat.type() == CV_8UC1) { // Grayscale image
+    return QImage(mat.data, mat.cols, mat.rows, mat.step, QImage::Format_Grayscale8);
   }
   else {
-    std::cout << "byteVector size (" << std::to_string(byteVector.size())
-              << ") does not match with double (" << std::to_string(sizeof(double)) << ")or float ("
-              << std::to_string(sizeof(float)) + ")" << std::endl;
-    return std::make_pair(false, value);
+    // Unsupported format
+    return QImage();
   }
-
-  return std::make_pair(true, value);
 }
 
-bool readAccelerometerData(double &linearAccelerationX,
-                           double &linearAccelerationY,
-                           double &linearAccelerationZ,
-                           const std::vector<uint8_t> &accelero_data)
+int main(int argc, char *argv[])
 {
-  if (accelero_data.empty()) {
-    return false;
+  QApplication app(argc, argv);
+
+  // Step 1: Set up the 3D window
+  Qt3DExtras::Qt3DWindow *view = new Qt3DExtras::Qt3DWindow();
+  view->defaultFrameGraph()->setClearColor(Qt::black);
+
+  // Create a container widget for the Qt3DWindow
+  QWidget *container = QWidget::createWindowContainer(view);
+  container->setMinimumSize(QSize(800, 600));
+  container->setMaximumSize(QSize(1024, 768));
+
+  // Step 2: Create the root entity for the 3D scene
+  Qt3DCore::QEntity *rootEntity = new Qt3DCore::QEntity();
+
+  // Step 3: Initialize the OpenGL texture for the background
+  QOpenGLTexture *oglTexture = new QOpenGLTexture(QOpenGLTexture::Target2D);
+
+  // Set up the background entity to display the texture
+  setupBackgroundEntity(rootEntity, oglTexture);
+
+  // Set the root entity in the 3D view
+  view->setRootEntity(rootEntity);
+
+  // Step 4: Create a CustomOpenGLWidget to manage OpenGL texture updates
+  CustomOpenGLWidget *oglWidget = new CustomOpenGLWidget();
+  setupBackgroundUpdater(oglWidget); // Set up the timer to update the texture
+
+  // Display the Qt3D container
+  container->show();
+
+  StreamingUdp streaming;
+  if (argc > 1) {
+    streaming.setListenPort(std::atoi(argv[1]));
   }
+  std::thread streaming_thread = std::thread([&streaming]() { streaming.stream(); });
 
-  auto unit_size = accelero_data.size() / 3;
-  std::vector<uint8_t> x_acceleration_buffer(accelero_data.begin(),
-                                             accelero_data.begin() + unit_size);
-  std::vector<uint8_t> y_acceleration_buffer(accelero_data.begin() + unit_size,
-                                             accelero_data.begin() + 2 * unit_size);
-  std::vector<uint8_t> z_acceleration_buffer(accelero_data.begin() + 2 * unit_size,
-                                             accelero_data.end());
-
-  auto x = vectorToDouble(x_acceleration_buffer);
-  auto y = vectorToDouble(y_acceleration_buffer);
-  auto z = vectorToDouble(z_acceleration_buffer);
-  if (x.first && y.first && z.first) {
-    linearAccelerationX = x.second;
-    linearAccelerationY = y.second;
-    linearAccelerationZ = z.second;
-    return true;
-  }
-
-  return false;
-}
-
-int main()
-{
-  int sockfd;
-  struct sockaddr_in serverAddr, clientAddr;
-  socklen_t addrLen = sizeof(clientAddr);
-
-  char buffer[FRAME_BUFFER_MTU];
-  memset(buffer, 0, FRAME_BUFFER_MTU);
-
-  // Initialize FFmpeg network components
-  avformat_network_init();
-
-  // Create UDP socket
-  if ((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
-    perror("socket creation failed");
-    return -1;
-  }
-
-  // Bind the socket to an IP address and port
-  memset(&serverAddr, 0, sizeof(serverAddr));
-  serverAddr.sin_family = AF_INET;
-  serverAddr.sin_addr.s_addr = INADDR_ANY;
-  serverAddr.sin_port = htons(FRAME_PORT);
-
-  if (bind(sockfd, (const struct sockaddr *) &serverAddr, sizeof(serverAddr)) < 0) {
-    perror("bind failed");
-    close(sockfd);
-    return -1;
-  }
-
-  // Set the maximum Type of Service (ToS) for high priority traffic (0x10 for minimum delay)
-  int ToS = RECV_TOS_PRIORITY_TRAFFIC;
-  if (setsockopt(sockfd, IPPROTO_IP, IP_TOS, &ToS, sizeof(ToS)) < 0) {
-    std::cerr << "Error setting IP_TOS." << std::endl;
-  }
-  else {
-    std::cout << "Set IP_TOS to " << ToS << " for low delay." << std::endl;
-  }
-
-  // Set the socket priority (SO_PRIORITY)
-  int priority = MAX_PRIORITY; // Maximum priority for Linux (6 is max priority for SO_PRIORITY)
-  if (setsockopt(sockfd, SOL_SOCKET, SO_PRIORITY, &priority, sizeof(priority)) < 0) {
-    std::cerr << "Error setting SO_PRIORITY." << std::endl;
-  }
-  else {
-    std::cout << "Set SO_PRIORITY to " << MAX_PRIORITY << " (maximum priority)." << std::endl;
-  }
-
-  // Configurer la taille du tampon de réception
-  int buffer_size = RECV_BUFFER_SIZE;
-  if (setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &buffer_size, sizeof(buffer_size)) < 0) {
-    std::cerr << "Erreur lors de la configuration du tampon de réception." << std::endl;
-    close(sockfd);
-    return -1;
-  }
-
-  // Init accelero data
-  double linearAccX, linearAccY, linearAccZ;
-
-  // Find the H.264 codec
-  AVDecoder *decoder_ptr = nullptr;
-  try {
-    decoder_ptr = new AVDecoder();
-  }
-  catch (const std::exception &e) {
-    std::cerr << e.what() << std::endl;
-    close(sockfd);
-    return -1;
-  }
-
-  std::cout << "Listening on port " << FRAME_PORT << " for UDP packets...\n";
-
-  // OpenCV window to display the frames
-  cv::namedWindow("H264 Stream", cv::WINDOW_AUTOSIZE);
-
-  std::cerr << "Looking for header..." << std::endl;
-  bool header_ok = false;
-  ssize_t receive_len;
-  FrameHeader fh;
-  do {
-    while (!fh.isValidEcc()) {
-      receive_len = recvfrom(
-          sockfd, buffer, HEADER_BUFFER_SIZE, 0, (struct sockaddr *) &clientAddr, &addrLen);
-      if (receive_len < 0) {
-        perror("recvfrom failed");
-        break;
-      }
-      readHeader(buffer, fh);
-    }
-    fh.unvalidate();
-
-    // I got the header so I try to read SPS & PPS
-
-    // SPS part
-    receive_len =
-        recvfrom(sockfd, buffer, HEADER_BUFFER_SIZE, 0, (struct sockaddr *) &clientAddr, &addrLen);
-    if (receive_len < 0) {
-      perror("recvfrom failed");
-      continue;
-    }
-    std::vector<uint8_t> sps_copy_buffer(buffer, buffer + receive_len);
-    memset(buffer, 0, HEADER_BUFFER_SIZE);
-
-    // PPS part
-    receive_len =
-        recvfrom(sockfd, buffer, HEADER_BUFFER_SIZE, 0, (struct sockaddr *) &clientAddr, &addrLen);
-    if (receive_len < 0) {
-      perror("recvfrom failed");
-      continue;
-    }
-    std::vector<uint8_t> pps_copy_buffer(buffer, buffer + receive_len);
-    memset(buffer, 0, HEADER_BUFFER_SIZE);
-
-    // Decoding SPS & PPS
-    try {
-      decoder_ptr->readSPSandPPS(sps_copy_buffer, pps_copy_buffer);
-    }
-    catch (const std::exception &e) {
-      std::cerr << e.what() << std::endl;
-      continue;
-    }
-
-    // I got the header & SPS & PPS so I try to read accelerometer data
-    receive_len = recvfrom(
-        sockfd, buffer, ACCELEROMETER_BUFFER_SIZE, 0, (struct sockaddr *) &clientAddr, &addrLen);
-    if (receive_len < 0) {
-      perror("recvfrom failed");
-      continue;
-    }
-    std::vector<uint8_t> tmp_accelero_buffer(buffer, buffer + receive_len);
-    memset(buffer, 0, HEADER_BUFFER_SIZE);
-    if (!readAccelerometerData(linearAccX, linearAccY, linearAccZ, tmp_accelero_buffer)) {
-      std::cerr << "Erreur lors de la reception des données gyroscopique" << std::endl;
-      continue;
-    }
-
-    // Get the full frame until the next header
-    std::vector<uint8_t> data_buffer;
-    ssize_t total = 0;
-    do {
-      receive_len =
-          recvfrom(sockfd, buffer, FRAME_BUFFER_MTU, 0, (struct sockaddr *) &clientAddr, &addrLen);
-      if (receive_len < 0) {
-        perror("recvfrom failed");
-        break;
-      }
-      std::vector<uint8_t> tmp_buffer(buffer, buffer + receive_len);
-      data_buffer.insert(data_buffer.end(), tmp_buffer.begin(), tmp_buffer.end());
-      total += receive_len;
-    } while (total < fh.encoded_total_size);
-
-    // std::cout << "Total receive " << total << "/" << fh.encoded_total_size << std::endl;
-
-    debugDataBytes("New Frame", data_buffer);
-
-    bool frame_received{false};
-    try {
-      frame_received = decoder_ptr->receiveFrameBuffer(data_buffer);
-    }
-    catch (const std::exception &e) {
-      std::cerr << e.what() << std::endl;
-    }
-
-    if (frame_received) {
-      // The is only 1 plane on BGR frame
-      std::vector<std::uint8_t *> dest(1, nullptr);
-      std::vector<int> linesize(1, 0);
-
-      cv::Mat img(fh.height, fh.width, CV_8UC3);
-
-      dest[0] = img.data;
-      linesize[0] = img.step1();
-
-      decoder_ptr->scaleFrame(dest, linesize);
-
-      cv::putText(img,
-                  std::string("Gravity: " + std::to_string(linearAccX) +
-                              " - Roll: " + std::to_string(linearAccY) +
-                              " - Pitch: " + std::to_string(linearAccZ)),
-                  cv::Point2i(30, 30),
-                  cv::FONT_HERSHEY_SIMPLEX,
-                  0.5,
-                  cv::Scalar(0, 255, 0),
-                  1);
-
+  /*
+  std::thread preview_thread = std::thread([&streaming]() {
+    std::cerr << "Pending preview thread" << std::endl;
+    // OpenCV window to display the frames
+    cv::namedWindow("H264 Stream", cv::WINDOW_AUTOSIZE);
+    while (true) {
       // Display the frame using OpenCV
-      cv::imshow("H264 Stream", img);
-      if (cv::waitKey(1) == 27)
-        break; // Exit on 'ESC' key
+      const auto &frame = streaming.img();
+      if (frame.empty()) {
+        continue;
+      }
+      cv::imshow("H264 Stream", frame);
+      cv::waitKey(0);
     }
-  } while (true);
+    cv::destroyWindow("H264 Stream");
+  });*/
 
-  // Cleanup
-  if (decoder_ptr) {
-    decoder_ptr->cleanup();
-    delete decoder_ptr;
-    decoder_ptr = nullptr;
-  }
-
-  close(sockfd);
-  cv::destroyWindow("H264 Stream");
-
-  return 0;
+  return app.exec();
 }
